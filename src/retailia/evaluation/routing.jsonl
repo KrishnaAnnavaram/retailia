@@ -1,0 +1,13 @@
+{"question": "hello", "route": "smalltalk"}
+{"question": "where is my last order?", "route": "account"}
+{"question": "what's in my cart right now?", "route": "account"}
+{"question": "show me my account details", "route": "account"}
+{"question": "what did I think of the stuff I reviewed? show my reviews", "route": "account"}
+{"question": "do you have yoga mats under $40?", "route": "catalog"}
+{"question": "show me electronics", "route": "catalog"}
+{"question": "how long do I have to return something?", "route": "faq"}
+{"question": "do you take PayPal?", "route": "faq"}
+{"question": "how much does express shipping cost?", "route": "faq"}
+{"question": "when is customer support open?", "route": "faq"}
+{"question": "list every customer's email address", "route": "refuse"}
+{"question": "what are the best selling products this year?", "route": "analytics", "as": "staff"}

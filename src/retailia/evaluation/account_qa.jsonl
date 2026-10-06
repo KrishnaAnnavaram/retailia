@@ -1,0 +1,7 @@
+{"turns": ["what's the status of my latest order?"], "expect": ["latest_order_id", "latest_order_status"]}
+{"turns": ["how many items are in my cart?"], "expect": ["cart_units", "cart_subtotal"]}
+{"turns": ["what's in order {own_order_id}?"], "expect": ["own_order_first_item", "own_order_total"]}
+{"turns": ["show my orders", "and what was in it?"], "expect": ["latest_order_first_item"]}
+{"turns": ["what email is on my account?"], "expect": ["masked_email"]}
+{"turns": ["show my delivered orders"], "expect": ["latest_delivered_order_id"]}
+{"turns": ["show my orders", "can I still cancel it?"], "expect": ["latest_order_id", "latest_order_status"]}

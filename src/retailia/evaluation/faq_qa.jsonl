@@ -1,0 +1,10 @@
+{"question": "How long do I have to return something?", "source": "store_faq#returns-and-refunds", "text": "30 days"}
+{"question": "Do you take PayPal?", "source": "store_faq#payment-methods", "text": "PayPal"}
+{"question": "How much is express shipping?", "source": "store_faq#shipping-options-and-delivery-times", "text": "$12.99"}
+{"question": "When is support available?", "source": "store_faq#contacting-support", "text": "9:00 AM - 6:00 PM"}
+{"question": "How do I track a parcel?", "source": "store_faq#tracking-an-order", "text": "https://example.com/track"}
+{"question": "My parcel arrived broken, what now?", "source": "store_faq#damaged-or-wrong-items", "text": "within 7 days"}
+{"question": "Which size should I pick if I'm between sizes?", "source": "store_faq#sizing-help", "text": "larger size"}
+{"question": "Is there a warranty on electronics?", "source": "store_faq#warranty", "text": "1-year"}
+{"question": "Can I cancel my order 1 if it already shipped?", "source": "store_faq#cancelling-an-order", "text": "processing"}
+{"question": "What's the weather like on Mars?", "source": null, "text": "couldn't find"}

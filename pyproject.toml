@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "retailia"
+version = "0.1.0"
+description = "Agentic customer-service bot: SQL agent plus FAQ RAG"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Krishna Annavaram" }]
+requires-python = ">=3.10"
+# The core (auth, scoped data access, retrieval, assistant loop, offline model) uses only the standard library.
+dependencies = []
+
+[project.optional-dependencies]
+openai = ["openai>=1.30"]
+ui = ["streamlit>=1.35"]
+pdf = ["pypdf>=4.0"]
+env = ["python-dotenv>=1.0"]
+dev = ["pytest>=8", "ruff"]
+all = ["retailia[openai,ui,pdf,env]"]
+
+[project.scripts]
+retailia = "retailia.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+retailia = ["data/schema.sql", "rag/faq/*.md", "evaluation/*.jsonl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
