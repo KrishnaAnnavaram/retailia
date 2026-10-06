@@ -24,6 +24,8 @@ from retailia.data.db import StoreDB
 from retailia.data.seed import seed_store
 from retailia.rag.index import build_index, save_index
 
+MAX_DEMO_CUSTOMERS = 999
+
 
 def cmd_init_db(settings: Settings, args: argparse.Namespace) -> int:
     password = secrets.token_urlsafe(9)
@@ -38,7 +40,11 @@ def cmd_init_db(settings: Settings, args: argparse.Namespace) -> int:
 
 def cmd_build_index(settings: Settings, args: argparse.Namespace) -> int:
     faq_dir = Path(args.faq_dir).resolve() if args.faq_dir else settings.faq_dir
-    index = build_index(faq_dir, make_embedder(settings))
+    try:
+        index = build_index(faq_dir, make_embedder(settings))
+    except (FileNotFoundError, ValueError) as exc:  # missing folder, or no .md/.txt/.pdf content in it
+        print(f"Cannot build the FAQ index: {exc}", file=sys.stderr)
+        return 1
     save_index(index, settings.index_path)
     print(f"Indexed {len(index.chunks)} FAQ sections from {faq_dir} -> {settings.index_path} "
           f"(version {index.version}, embedder {index.embedder})")
@@ -87,17 +93,29 @@ def cmd_ui(settings: Settings, args: argparse.Namespace) -> int:
                             str(Path(__file__).parent / "ui" / "streamlit_app.py")])
 
 
+def _customer_count(raw: str) -> int:
+    # Staff accounts use customer ids from 1001, so at most 999 demo customers fit.
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number, got {raw!r}") from None
+    if not 1 <= value <= MAX_DEMO_CUSTOMERS:
+        raise argparse.ArgumentTypeError(f"must be between 1 and {MAX_DEMO_CUSTOMERS}, got {value}")
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="retailia", description="Retail customer-service assistant")
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("init-db", help="create the synthetic store database (replaces existing demo data)")
-    p.add_argument("--customers", type=int, default=20)
+    p.add_argument("--customers", type=_customer_count, default=20,
+                   help=f"number of demo customers, 1 to {MAX_DEMO_CUSTOMERS} (default: 20)")
     p = sub.add_parser("build-index", help="build the FAQ index")
-    p.add_argument("--faq-dir", default=None)
+    p.add_argument("--faq-dir", default=None, help="folder of .md, .txt or .pdf FAQ files (default: RETAILIA_FAQ_DIR)")
     p = sub.add_parser("chat", help="chat in the terminal")
     p.add_argument("--username", required=True)
     p = sub.add_parser("eval", help="run evaluation + red-team suites")
-    p.add_argument("--json", default=None)
+    p.add_argument("--json", default=None, help="also write the summary to this file")
     sub.add_parser("ui", help="launch the Streamlit app")
     args = parser.parse_args(argv)
 
