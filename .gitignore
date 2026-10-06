@@ -11,8 +11,7 @@
 *.db-shm
 *.sqlite3
 faq_index*.json
-data/
-
+/data/
 # python
 __pycache__/
 *.py[cod]
