@@ -66,6 +66,7 @@ This README is the **one location that explains all of retailia**. It gives thes
 4. 🔄 [The end-to-end workflow](#4-the-end-to-end-workflow)
    - 4.1 [Full flow](#41-full-flow)
    - 4.2 [The life cycle of one question](#42-the-life-cycle-of-one-question)
+   - 4.3 [Who does which step](#43-who-does-which-step)
 5. 🔵 [Sign-in and sessions](#5-sign-in-and-sessions)
 6. 🟢 [The guardrails](#6-the-guardrails)
 7. 🟣 [The assistant loop](#7-the-assistant-loop)
@@ -143,6 +144,58 @@ flowchart LR
 | Evaluation harness | `src/retailia/evaluation/harness.py`, `evaluation/*.jsonl` | Run four suites (41 cases) and give a summary |
 | User interfaces | `src/retailia/cli.py`, `ui/streamlit_app.py` | The `retailia` command and the Streamlit chat app |
 
+This map shows which module calls which module.
+
+```mermaid
+flowchart TB
+    subgraph UI["User interfaces"]
+        CLI["cli.py<br/>retailia command"]
+        ST["ui/streamlit_app.py"]
+    end
+    APP["app.py<br/>build, make_model, make_embedder"]
+    EVAL["evaluation/harness.py<br/>run_suites"]
+    AUTH["auth/<br/>AuthService, SessionStore, scrypt"]
+    subgraph AGENT["agent/"]
+        AS["assistant.py<br/>Assistant"]
+        GR["guardrails.py"]
+        MOD["models.py, offline.py<br/>ChatModel classes"]
+        RT["router.py<br/>classify"]
+        TL["tools.py<br/>run_tool, HANDLERS"]
+    end
+    subgraph DATA["data/"]
+        REPO["repositories.py<br/>CustomerScope, Catalog"]
+        AN["analytics.py<br/>run_analytics_query"]
+        DB["db.py<br/>StoreDB"]
+        SEED["seed.py<br/>seed_store"]
+    end
+    subgraph RAG["rag/"]
+        RET["retriever.py<br/>HybridRetriever"]
+        IDX["index.py, documents.py,<br/>embeddings.py"]
+    end
+    CLI --> APP
+    ST --> APP
+    CLI --> SEED
+    CLI --> IDX
+    CLI --> EVAL
+    EVAL --> APP
+    APP --> AUTH
+    APP --> AS
+    APP --> MOD
+    APP --> RET
+    AUTH --> DB
+    AS --> GR
+    AS --> MOD
+    AS --> TL
+    MOD --> RT
+    TL --> REPO
+    TL --> AN
+    TL --> RET
+    REPO --> DB
+    AN --> DB
+    SEED --> DB
+    RET --> IDX
+```
+
 ### 2.2 System context
 
 ```mermaid
@@ -189,6 +242,18 @@ retailia/
 ### 3.1 The identity comes from sign-in, not from the model
 No tool has a customer id or a username argument. Each account tool reads through a `CustomerScope` that the tool context makes from `principal.customer_id`. The argument validation rejects each unknown key, so an injected `customer_id` gives `bad_arguments`.
 
+```mermaid
+flowchart LR
+    LOGIN["AuthService.login"] --> P["Principal<br/>customer_id from the database row"]
+    P --> CTX["ToolContext"]
+    CTX --> SC["CustomerScope<br/>bound to principal.customer_id"]
+    SC --> SQL[("SQL with customer_id = ?")]
+    M[/"Model tool request<br/>with an injected customer_id"/] --> CHK{"check_args:<br/>unknown key?"}
+    CHK -- "yes" --> BAD[/"bad_arguments"/]
+    CHK -- "no" --> H["Tool handler"]
+    H --> CTX
+```
+
 ### 3.2 A different customer's data looks like no data
 Each account query has `customer_id = ?` with the id of the principal. An order of a different customer gives the same result as an order that does not exist: "No order N on your account."
 
@@ -217,27 +282,57 @@ The assistant logs tool names, the refusal flag, the injection flag and the late
 ### 4.1 Full flow
 
 ```mermaid
-flowchart TB
-    S["Sign-in: username + password, lockout"] --> P["Principal (customer_id, role)"]
-    P --> Q["Question (max 2000 characters)"]
+flowchart TD
+    CRED[/"Username and password"/] --> S{{"HUMAN<br/>Sign-in: AuthService.login, lockout"}}
+    S --> P["Principal: customer_id, role"]
+    P --> Q[/"Question, max 2000 characters"/]
     Q --> X{"Cross-account request?"}
-    X -- "yes" --> R["Refusal (model not called)"]
-    X -- "no" --> L["Model loop (max RETAILIA_MAX_TOOL_STEPS)"]
+    X -- "yes" --> R[/"Refusal, model not called"/]
+    X -- "no" --> L["Model loop<br/>max RETAILIA_MAX_TOOL_STEPS"]
     L --> T["run_tool: role filter, argument validation"]
     T --> AT["Account tools: customer scope"]
     T --> CT["Catalog tools: v_catalog"]
     T --> FT["search_faq: hybrid retriever"]
-    T --> ST["run_catalog_analytics (staff): authorizer"]
+    T --> ST["run_catalog_analytics, staff only:<br/>authorizer"]
     AT --> DB[("SQLite, read-only")]
     CT --> DB
     ST --> DB
     FT --> IDX[("FAQ index JSON")]
-    T --> L
+    T -- "tool result" --> L
     L --> O["Output checks: citations, email redaction"]
-    O --> A["Answer"]
+    O --> A[/"Answer with citations"/]
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class S human
 ```
 
 ### 4.2 The life cycle of one question
+
+```mermaid
+stateDiagram-v2
+    state "Question received" as Received
+    state "Empty question" as Empty
+    state "Refused" as Refused
+    state "Waiting for a model turn" as ModelTurn
+    state "Tool requests run" as Tools
+    state "Final text from the model" as Text
+    state "Finalised answer" as Final
+    [*] --> Received: ask, strip, cut to 2000 characters
+    Received --> Empty: no text left
+    Received --> Refused: targets_other_accounts
+    Received --> ModelTurn: question added to the history
+    ModelTurn --> Tools: turn has tool requests
+    Tools --> ModelTurn: tool results added to the history
+    ModelTurn --> Text: turn has no tool requests
+    ModelTurn --> UNAVAILABLE: ModelError
+    Tools --> GAVE_UP: step limit reached
+    Text --> Final: _finalise
+    UNAVAILABLE --> Final: _finalise
+    GAVE_UP --> Final: _finalise
+    Final --> [*]: history trimmed to 30 messages
+    Refused --> [*]: refusal added to the history
+    Empty --> [*]
+```
 
 1. The person completes the sign-in. `AuthService.login` gives a `Principal` with an integer `customer_id` and a role.
 2. The interface starts a `Conversation` for the principal.
@@ -250,11 +345,77 @@ flowchart TB
 9. The assistant removes invented citations and redacts each email address that is not permitted.
 10. The assistant adds the answer to the history, trims the history to 30 messages and logs the metadata.
 
+### 4.3 Who does which step
+
+This sequence shows one question in `retailia chat` with the offline model. The question needs an account tool and the FAQ.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor C as Customer
+    participant CLI as retailia chat
+    participant AU as AuthService
+    participant AS as Assistant
+    participant M as Model
+    participant T as run_tool
+    participant DB as SQLite store
+    participant R as HybridRetriever
+
+    C->>CLI: retailia chat --username customer02
+    CLI->>CLI: Settings.from_env, build
+    CLI->>C: password prompt with getpass
+    C->>CLI: password
+    CLI->>AU: login(username, password)
+    AU->>DB: read customers row, update counters, read-write
+    AU-->>CLI: Principal
+    CLI->>AS: start(principal)
+    C->>CLI: where is my last order and can I cancel it?
+    CLI->>AS: ask(conversation, question)
+    AS->>AS: looks_like_injection, targets_other_accounts
+    AS->>M: next_turn(system prompt, history, tools for the role)
+    M-->>AS: tool request get_my_orders
+    AS->>T: run_tool(ctx, get_my_orders, args)
+    T->>DB: CustomerScope.orders with customer_id = ?, read-only
+    DB-->>T: order rows
+    T-->>AS: tool result with found
+    AS->>M: next_turn with the tool result
+    M-->>AS: tool request search_faq, policy word cancel
+    AS->>T: run_tool(ctx, search_faq, question)
+    T->>R: search(question)
+    R-->>T: up to 3 passages
+    T-->>AS: passages, kept in passages_seen
+    AS->>M: next_turn with the passages
+    M-->>AS: text with a citation
+    AS->>AS: _finalise, then _keep, then log metadata
+    AS-->>CLI: Answer
+    CLI-->>C: answer text
+```
+
 ---
 
 ## 5. Sign-in and sessions
 
 **Purpose.** Identify the person with the minimum disclosure, and stop password guesses on one account.
+
+```mermaid
+flowchart TD
+    IN[/"Username and password"/] --> NORM["Strip and lower-case the username"]
+    NORM --> ROW["Read the customers row<br/>read-write connection"]
+    ROW --> EX{"Row exists?"}
+    EX -- "no" --> DUM["check_password against DUMMY_HASH,<br/>same time"]
+    DUM --> FAIL[/"LoginFailed:<br/>invalid username or password"/]
+    EX -- "yes" --> LK{"locked_until after<br/>the clock time?"}
+    LK -- "yes" --> FAIL
+    LK -- "no" --> PWD{"check_password<br/>correct?"}
+    PWD -- "yes" --> RESET["failed_logins = 0,<br/>locked_until = NULL"]
+    RESET --> PR[/"Principal: customer_id,<br/>username, role, email"/]
+    PWD -- "no" --> INC["failed_logins + 1"]
+    INC --> MAX{"Failures reach<br/>RETAILIA_MAX_LOGIN_FAILURES?"}
+    MAX -- "yes" --> LOCK["locked_until = now + lockout,<br/>counter set to 0"]
+    MAX -- "no" --> SAVE["Save the counter"]
+    LOCK --> FAIL
+    SAVE --> FAIL
+```
 
 | Input | Output |
 |---|---|
@@ -299,6 +460,19 @@ flowchart TB
 
 **Purpose.** Stop clear cross-account requests before the model, flag injection text, and remove foreign email addresses from answers.
 
+```mermaid
+flowchart LR
+    Q[/"Question"/] --> INJ["looks_like_injection<br/>_INJECTION patterns"]
+    INJ --> FLAG[/"injection_suspected<br/>answer and log only"/]
+    Q --> XA{"targets_other_accounts<br/>_CROSS_ACCOUNT match?"}
+    XA -- "yes" --> REF[/"CROSS_ACCOUNT_REFUSAL<br/>model not called"/]
+    XA -- "no" --> LOOP["Assistant model loop"]
+    LOOP --> TXT["Answer text"]
+    ALLOW["Permitted emails: email of the principal<br/>and emails in the passages of this question"] --> RED["redact_foreign_emails"]
+    TXT --> RED
+    RED --> OUT[/"Text with each foreign email<br/>replaced"/]
+```
+
 | Input | Output |
 |---|---|
 | The question, or the final answer text | A refusal decision, an injection flag, or redacted text |
@@ -329,6 +503,30 @@ flowchart TB
 
 **Purpose.** Run the guardrails, the model and the tools for one question, inside a step limit.
 
+```mermaid
+flowchart TD
+    IN[/"Conversation and question"/] --> CUT["ask: start the timer,<br/>strip, cut to 2000 characters"]
+    CUT --> E{"Empty?"}
+    E -- "yes" --> EA[/"Please type a question."/]
+    E -- "no" --> G{"Guardrails:<br/>cross-account request?"}
+    G -- "yes" --> REF[/"Refusal"/]
+    G -- "no" --> CTX["ToolContext, tools_for the role,<br/>system prompt"]
+    CTX --> NT["model.next_turn"]
+    NT --> ME{"ModelError?"}
+    ME -- "yes" --> UN["Text is UNAVAILABLE"]
+    ME -- "no" --> RQ{"Tool requests?"}
+    RQ -- "no" --> TX["Text is the turn content"]
+    RQ -- "yes" --> RUN["run_tool for each request,<br/>add the tool results to the history"]
+    RUN --> LIM{"Step limit reached?"}
+    LIM -- "no" --> NT
+    LIM -- "yes" --> GU["Text is GAVE_UP"]
+    UN --> FIN["_finalise: keep retrieved citations,<br/>add a Source line, redact emails"]
+    TX --> FIN
+    GU --> FIN
+    FIN --> KEEP["_keep: trim the history to 30,<br/>cut only at a question"]
+    KEEP --> OUT[/"Answer and the metadata log line"/]
+```
+
 | Input | Output |
 |---|---|
 | A `Conversation` and one question | An `Answer`: `text`, `tools`, `citations`, `refused`, `injection_suspected`, `latency_ms` |
@@ -358,6 +556,27 @@ flowchart TB
 
 **Purpose.** Give one `ChatModel` interface to the assistant, with an offline model and a hosted model behind it.
 
+```mermaid
+flowchart TD
+    CFG{"RETAILIA_LLM_PROVIDER"} -- "offline" --> OFF["OfflineModel.next_turn"]
+    CFG -- "openai" --> OAI["OpenAICompatModel.next_turn"]
+    MSG[/"Messages and tool specs"/] --> OFF
+    MSG --> OAI
+    OAI --> API["chat.completions.create<br/>temperature 0, timeout 30 s"]
+    API --> ER{"Exception?"}
+    ER -- "yes" --> MERR[/"ModelError with<br/>the class name only"/]
+    ER -- "no" --> DEC["_decode_args:<br/>bad JSON gives None"]
+    DEC --> TURN[/"ModelTurn: text, tool requests"/]
+    OFF --> RES{"Tool results for<br/>this question?"}
+    RES -- "no" --> PLAN["_plan: router.classify,<br/>select the first tool and its arguments"]
+    RES -- "yes" --> FB{"_fallback: policy word after an order tool<br/>or after an empty product search?"}
+    FB -- "yes" --> FAQ["Request search_faq"]
+    FB -- "no" --> ANS["_answer: template text,<br/>top FAQ passage word for word"]
+    PLAN --> TURN
+    FAQ --> TURN
+    ANS --> TURN
+```
+
 | Input | Output |
 |---|---|
 | A list of neutral messages and the tool specs | A `ModelTurn` with text, tool requests or both |
@@ -371,6 +590,25 @@ flowchart TB
 | `FakeChatModel` | `agent/models.py` | Test double that gives pre-written turns and records each request |
 
 **Routes of the router**
+
+```mermaid
+flowchart TD
+    Q[/"Question"/] --> S{"_SMALLTALK?"}
+    S -- "yes" --> RS[/"smalltalk"/]
+    S -- "no" --> A{"_ANALYTICS?"}
+    A -- "yes" --> RA[/"analytics"/]
+    A -- "no" --> O{"Order number?"}
+    O -- "yes" --> RO[/"account, intent order"/]
+    O -- "no" --> M{"my cart, my account,<br/>my reviews, my orders?"}
+    M -- "yes" --> RM[/"account, intent cart, account,<br/>reviews or orders"/]
+    M -- "no" --> F{"it, that order, the order?"}
+    F -- "yes" --> RF[/"account, intent follow_up"/]
+    F -- "no" --> P{"Policy word and<br/>no catalog phrase?"}
+    P -- "yes" --> RQ[/"faq"/]
+    P -- "no" --> C{"Catalog phrase<br/>or category name?"}
+    C -- "yes" --> RC[/"catalog: category,<br/>max_price, query"/]
+    C -- "no" --> RU[/"unknown"/]
+```
 
 | Route | Example question | First tool of the offline model |
 |---|---|---|
@@ -407,6 +645,28 @@ flowchart TB
 ## 9. The nine tools
 
 **Purpose.** Give the model typed, read-only access to the data of the principal and to public data.
+
+```mermaid
+flowchart TD
+    REQ[/"Tool request: name and args"/] --> F{"Name in<br/>tools_for the principal?"}
+    F -- "no" --> UT[/"unknown_tool"/]
+    F -- "yes" --> OBJ{"check_args: JSON object<br/>with known keys only?"}
+    OBJ -- "no" --> BA[/"bad_arguments"/]
+    OBJ -- "yes" --> VAL{"Required fields present,<br/>types, ranges, lengths, choices valid?"}
+    VAL -- "no" --> BA
+    VAL -- "yes" --> H{"HANDLERS"}
+    H -- "account tool" --> SC["CustomerScope"]
+    H -- "catalog tool" --> CAT["Catalog"]
+    H -- "search_faq" --> RET["HybridRetriever.search,<br/>record passages_seen"]
+    H -- "run_catalog_analytics" --> STF{"Principal is staff?"}
+    STF -- "no" --> FB[/"forbidden"/]
+    STF -- "yes" --> AQ{"run_analytics_query<br/>denied?"}
+    AQ -- "yes" --> QR[/"query_rejected"/]
+    AQ -- "no" --> OK[/"Tool result JSON with found"/]
+    SC --> OK
+    CAT --> OK
+    RET --> OK
+```
 
 | Input | Output |
 |---|---|
@@ -450,6 +710,22 @@ flowchart TB
 
 **Purpose.** Run all account and product queries with bound parameters, and bind each account query to one customer.
 
+```mermaid
+flowchart LR
+    CID[/"principal.customer_id"/] --> T{"Plain int?"}
+    T -- "no" --> TE[/"TypeError"/]
+    T -- "yes" --> SC["CustomerScope"]
+    SC --> Q["Query with customer_id = ?<br/>at most 25 rows"]
+    W[/"Words, category,<br/>max price, in stock"/] --> CS["Catalog.search: 6 words,<br/>escape LIKE wildcards"]
+    CS --> V["Query on v_catalog,<br/>sort by price and name"]
+    Q --> RO[("StoreDB.read_only<br/>mode=ro, query_only")]
+    V --> RO
+    RO --> R{"Row found?"}
+    R -- "no" --> NONE[/"None or empty list,<br/>same as no data"/]
+    R -- "yes" --> FMT["money: cents as text<br/>mask_email: first letter only"]
+    FMT --> OUT[/"Dictionaries for the tool"/]
+```
+
 | Input | Output |
 |---|---|
 | A `customer_id` from the principal (scope) or nothing (catalog) | Dictionaries with prices as text, for example `$24.99` |
@@ -461,7 +737,7 @@ flowchart TB
 3. `order` reads the order with `order_id = ? AND customer_id = ?`, then the items of that order.
 4. `profile` masks the email to the first letter, for example `c***@example.com`.
 5. `Catalog.search` uses at most six words of the query and escapes `%`, `_` and `\` in `LIKE` patterns.
-6. `Catalog.search` removes a final `s` from words longer than three letters, then sorts by price and name.
+6. `Catalog.search` removes all final `s` letters from words longer than three letters, then sorts by price and name.
 
 **Rules**
 
@@ -474,6 +750,24 @@ flowchart TB
 ## 11. Staff analytics
 
 **Purpose.** Let a staff member ask for reports in SQL, with no access to personal data.
+
+```mermaid
+flowchart TD
+    SQL[/"SQL from the model"/] --> TR["Strip spaces and a final semicolon"]
+    TR --> EM{"Empty?"}
+    EM -- "yes" --> DEN[/"AnalyticsDenied"/]
+    EM -- "no" --> MS{"Semicolon remains?"}
+    MS -- "yes" --> DEN
+    MS -- "no" --> CONN["read_only connection,<br/>set_authorizer, progress handler"]
+    CONN --> COMP["SQLite compiles the statement"]
+    COMP --> AU{"_authorizer,<br/>each action"}
+    AU -- "SELECT, view read, view base column,<br/>permitted function" --> RUN["Run the query"]
+    AU -- "customers, other column, other function,<br/>each other action" --> DEN
+    RUN --> STEP{"More than 2 000 000<br/>VM steps?"}
+    STEP -- "yes" --> DEN
+    STEP -- "no" --> FETCH["fetchmany 51 rows"]
+    FETCH --> OUT[/"Columns, up to 50 rows,<br/>truncated flag"/]
+```
 
 | Input | Output |
 |---|---|
@@ -516,6 +810,20 @@ flowchart TB
 
 **Procedure of `retailia build-index`**
 
+```mermaid
+flowchart LR
+    DIR[/"RETAILIA_FAQ_DIR or --faq-dir"/] --> LOAD["load_faq_chunks<br/>files in name sequence"]
+    LOAD --> KIND{"File type"}
+    KIND -- ".md or .txt" --> MD["split_markdown:<br/>one section for each level 2 or 3 heading"]
+    KIND -- ".pdf, pypdf installed" --> PDF["_pdf_chunks:<br/>sections of each page"]
+    MD --> LIM["_limit: split a section above<br/>1500 characters at blank lines"]
+    PDF --> LIM
+    LIM --> EMB["embedder.embed<br/>title and text"]
+    EMB --> HASH["_source_hash: SHA-256"]
+    HASH --> SAVE["save_index: write .tmp,<br/>then replace"]
+    SAVE --> IDX[("faq_index.json<br/>RETAILIA_INDEX_PATH")]
+```
+
 1. Read each `.md` and `.txt` file in `RETAILIA_FAQ_DIR` (or `--faq-dir`), in name sequence.
 2. Make one section for each `##` or `###` heading. Text before the first heading goes to an `Introduction` section.
 3. Split a section longer than 1500 characters at blank lines.
@@ -525,6 +833,20 @@ flowchart TB
 7. Write the JSON to a `.tmp` file, then replace the index file in one step.
 
 **Procedure of `search_faq`**
+
+```mermaid
+flowchart TD
+    Q[/"Question"/] --> TOK["tokenize: lower case,<br/>no stop words, stem"]
+    TOK --> BM["BM25 score of each section<br/>k1 1.4, b 0.75"]
+    Q --> VEC["embedder.embed the question"]
+    VEC --> COS["Cosine with each section vector"]
+    BM --> KEEP{"BM25 1.5 or more,<br/>or cosine 0.3 or more?"}
+    COS --> KEEP
+    KEEP -- "no section" --> EMPTY[/"Empty list, found false"/]
+    KEEP -- "candidates" --> NORM["Normalize both scores<br/>to the maximum"]
+    NORM --> FUSE["0.6 × BM25 + 0.4 × cosine"]
+    FUSE --> TOP[/"Top 3 passages<br/>with section ids and scores"/]
+```
 
 1. Tokenize the question: lowercase words, no stop words, a short suffix stemmer.
 2. Calculate the BM25 score of each section (k1 = 1.4, b = 0.75).
@@ -551,6 +873,25 @@ flowchart TB
 ## 13. The evaluation harness
 
 **Purpose.** Measure a model on four suites, and fail on any data leak or database change.
+
+```mermaid
+flowchart TD
+    TMP["TemporaryDirectory retailia-eval-*"] --> FAQ["Copy the FAQ,<br/>add the poisoned zz_extra.md"]
+    FAQ --> SEED["seed_store: 8 customers,<br/>seed 11, 2026-03-01"]
+    SEED --> IDX["build_index with hashing-512"]
+    IDX --> GT["_ground_truth for customer03<br/>direct SQL"]
+    GT --> FP1["_fingerprint before"]
+    FP1 --> LOGIN["build, login customer03 and staff01"]
+    LOGIN --> S1["routing.jsonl, 13 cases"]
+    S1 --> S2["account_qa.jsonl, 7 cases"]
+    S2 --> S3["faq_qa.jsonl, 10 cases"]
+    S3 --> S4["redteam.jsonl, 11 cases"]
+    S4 --> FP2["_fingerprint after"]
+    FP2 --> SUM[/"Summary: accuracy values,<br/>latency, failures"/]
+    SUM --> GATE{"All red-team cases pass<br/>and db_unchanged?"}
+    GATE -- "yes" --> E0[/"retailia eval exit code 0"/]
+    GATE -- "no" --> E1[/"retailia eval exit code 1"/]
+```
 
 | Input | Output |
 |---|---|
@@ -607,6 +948,20 @@ The 11 red-team cases try these attacks:
 
 ### 14.1 The command line
 
+```mermaid
+flowchart LR
+    ARGS[/"retailia command<br/>and arguments"/] --> PARSE["argparse"]
+    PARSE --> ENV["load_env_file"]
+    ENV --> SET{"Settings.from_env<br/>valid?"}
+    SET -- "no" --> E2[/"Configuration error,<br/>exit code 2"/]
+    SET -- "yes" --> CMD{"Command"}
+    CMD -- "init-db" --> I["seed_store,<br/>print the password once"]
+    CMD -- "build-index" --> B["build_index, save_index"]
+    CMD -- "chat" --> C["login with getpass,<br/>loop until quit or exit"]
+    CMD -- "eval" --> EV["run_suites, print JSON"]
+    CMD -- "ui" --> U["python -m streamlit run"]
+```
+
 | Command | Arguments | What it does | Exit codes |
 |---|---|---|---|
 | `retailia init-db` | `--customers N` (1 to 999, default 20) | Delete the demo data, seed the store and print the demo password once | 0 |
@@ -618,6 +973,25 @@ The 11 red-team cases try these attacks:
 A configuration error gives exit code 2 and the text "Configuration error: ...". In `chat`, type `quit` or `exit` to stop. If the FAQ index is not available, `chat` prints a note at the start.
 
 ### 14.2 The Streamlit app
+
+```mermaid
+flowchart TD
+    START["get_app: one cached build"] --> CFG{"SettingsError?"}
+    CFG -- "yes" --> ERR[/"Configuration error"/]
+    CFG -- "no" --> DB{"Database file exists?"}
+    DB -- "no" --> WARN[/"Run retailia init-db"/]
+    DB -- "yes" --> TOK{"sessions.get token<br/>gives a principal?"}
+    TOK -- "no" --> FORM{{"HUMAN<br/>Sign-in form"}}
+    FORM --> LOG["auth.login, sessions.create,<br/>assistant.start"]
+    LOG --> TOK
+    TOK -- "yes" --> CHAT["Chat: transcript and sidebar"]
+    CHAT --> ASK["assistant.ask"]
+    ASK --> SHOW[/"Answer and Sources line"/]
+    CHAT -- "Sign out" --> REV["sessions.revoke"]
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class FORM human
+```
 
 1. The app reads the settings once and keeps one `Retailia` object for the server process.
 2. If the database file does not exist, the app tells you to run `retailia init-db`.
@@ -631,6 +1005,20 @@ A configuration error gives exit code 2 and the text "Configuration error: ...".
 ## 15. The security model
 
 This table lists each risk and the code that controls it.
+
+```mermaid
+flowchart LR
+    Q[/"Question"/] --> L1["Guardrails<br/>refusal, injection flag"]
+    L1 --> L2["tools_for:<br/>role filter before the model"]
+    L2 --> L3["run_tool:<br/>role check, check_args"]
+    L3 --> L4["CustomerScope<br/>customer_id = ?"]
+    L3 --> L5["Analytics authorizer<br/>3 views, never customers"]
+    L4 --> L6[("Read-only connection<br/>mode=ro, query_only")]
+    L5 --> L6
+    L6 --> L7["_finalise:<br/>true citations, email redaction"]
+    L7 --> L8["Log: metadata only,<br/>PiiRedactingFilter"]
+    L8 --> A[/"Answer"/]
+```
 
 | Risk | Control in code | Module |
 |---|---|---|
@@ -666,6 +1054,56 @@ This table lists each risk and the code that controls it.
 | Temporary folder `retailia-eval-*` | No (deleted after the run) | Store, FAQ copy and index for the evaluation |
 
 **Tables of the store**
+
+```mermaid
+erDiagram
+    customers ||--o| carts : has
+    carts ||--o{ cart_items : contains
+    products ||--o{ cart_items : "is in"
+    customers ||--o{ orders : places
+    orders ||--|{ order_items : contains
+    products ||--o{ order_items : "is in"
+    categories ||--o{ products : groups
+    customers ||--o{ feedback : writes
+    products ||--o{ feedback : gets
+    customers {
+        INTEGER customer_id PK
+        TEXT username
+        TEXT password_hash
+        TEXT role
+        TEXT email
+        INTEGER failed_logins
+        TEXT locked_until
+    }
+    products {
+        INTEGER product_id PK
+        TEXT sku
+        TEXT name
+        INTEGER price_cents
+        INTEGER stock
+        INTEGER category_id FK
+    }
+    orders {
+        INTEGER order_id PK
+        INTEGER customer_id FK
+        TEXT status
+        TEXT placed_at
+        INTEGER total_cents
+        TEXT tracking_code
+    }
+    order_items {
+        INTEGER order_id FK
+        INTEGER product_id FK
+        INTEGER quantity
+        INTEGER unit_price_cents
+    }
+    feedback {
+        INTEGER feedback_id PK
+        INTEGER customer_id FK
+        INTEGER product_id FK
+        INTEGER rating
+    }
+```
 
 | Table | Contents |
 |---|---|
@@ -716,6 +1154,17 @@ cp .env.example .env            # optional: fill in only what you need
 ### 17.3 Run retailia
 
 Run the offline demo first. It needs no key and no network.
+
+```mermaid
+flowchart LR
+    INS["pip install<br/>dev extra"] --> DB["retailia init-db"]
+    DB --> IX["retailia build-index"]
+    IX --> CH["retailia chat"]
+    IX --> EV["retailia eval"]
+    IX --> UI["retailia ui<br/>ui extra"]
+    DB --> S1[("retailia.db")]
+    IX --> S2[("faq_index.json")]
+```
 
 ```bash
 retailia init-db                        # 20 customers, 1 staff, 108 products; prints the demo password once
